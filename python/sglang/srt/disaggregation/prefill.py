@@ -2096,6 +2096,8 @@ class SchedulerDisaggregationPrefillMixin:
             # the last chunk. Payload builders stay on the release's newer
             # _full_kv_pages_payload (MINIMAX_INDEX_K included: index rows live
             # at the same loc as main KV on the same page_size).
+            # MINIMAX_INDEX_K reuses _dsa_payload: index rows live at the same loc
+            # as main KV on the same page_size.
             payloads = {StateType.PD_HIDDEN: _pd_hidden_payload}
             if last_chunk:
                 payloads.update(

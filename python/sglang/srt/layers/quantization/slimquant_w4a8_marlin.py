@@ -56,6 +56,14 @@ from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 logger = logging.getLogger(__name__)
 
 W4A8_TPMOE_BACKEND_ENV = "SGLANG_W4A8_TPMOE_BACKEND"
+W4A8_TPMOE_BACKEND_AUTO = "auto"
+W4A8_TPMOE_BACKEND_LIGHTOP = "lightop"
+W4A8_TPMOE_BACKEND_AITER = "aiter"
+W4A8_TPMOE_BACKEND_TRITON = "triton"
+_requested_backend = (
+    os.getenv(W4A8_TPMOE_BACKEND_ENV, W4A8_TPMOE_BACKEND_AUTO).strip().lower()
+)
+
 
 _lmslim_w4a8_marlin_available = False
 _lmslim_w4a8_triton_available = False
@@ -601,6 +609,7 @@ class SlimQuantW4A8Int8MarlinMoEMethod:
     def __init__(self, quant_config):
         self.quant_config = quant_config
         self.use_deepep = get_moe_a2a_backend().is_deepep()
+        self.use_triton = _resolved_backend == W4A8_TPMOE_BACKEND_TRITON
 
     def create_weights(
         self,
@@ -809,6 +818,17 @@ class SlimQuantW4A8Int8MarlinMoEMethod:
         x, topk_weights = apply_topk_weights_cpu(
             self.moe_runner_config.apply_router_weight_on_input, topk_weights, x
         )
+        if self.use_triton:
+            output = self._apply_triton(
+                layer,
+                x,
+                topk_weights,
+                topk_ids,
+                layer.moe_runner_config.activation,
+                shared_output=None,
+            )
+            return StandardCombineInput(hidden_states=output)
+
         workspace, global_reduce_buffer = MarlinMoeWorkspace(x.device).get_buffers()
         routed_scaling_factor = (
             self.moe_runner_config.routed_scaling_factor
@@ -885,6 +905,20 @@ class SlimQuantW4A8Int8MarlinMoEMethod:
         x, topk_weights = apply_topk_weights_cpu(
             self.moe_runner_config.apply_router_weight_on_input, topk_weights, x
         )
+        if self.use_triton:
+            if i_q is not None or i_s is not None:
+                raise NotImplementedError(
+                    "pre-quantized activation input is not supported by the Triton W4A8 MoE path yet."
+                )
+            return self._apply_triton(
+                layer,
+                x,
+                topk_weights,
+                topk_ids,
+                activation,
+                shared_output=shared_output,
+            )
+
         workspace, global_reduce_buffer = MarlinMoeWorkspace(x.device).get_buffers()
         routed_scaling_factor = (
             self.moe_runner_config.routed_scaling_factor
@@ -945,6 +979,36 @@ class SlimQuantW4A8Int8MarlinMoEMethod:
         routed_scaling_factor = (
             1.0 if routed_scaling_factor is None else routed_scaling_factor
         )
+        if self.use_triton:
+            if shared_output is not None:
+                raise NotImplementedError(
+                    "shared_output is not supported by apply_ep Triton W4A8 MoE path yet."
+                )
+            cache13 = get_moe_cache(
+                topk_ids.shape[1],
+                w1.shape[1],
+                w2.shape[1],
+                device=x.device,
+                dtype=x.dtype,
+            )
+            return fused_experts_impl_w4a8_triton(
+                x,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                cache13,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                routed_scaling_factor=float(routed_scaling_factor),
+                shared_output=None,
+            )
+
+        workspace, global_reduce_buffer = MarlinMoeWorkspace(x.device).get_buffers()
         return fused_experts_impl_w4a8_marlin(
             x,
             w1,
